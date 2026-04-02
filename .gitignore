@@ -1,0 +1,5 @@
+// Ignore unncessary files
+
+/error
+/output
+*.png
