@@ -1,5 +1,6 @@
 from os.path import join
 import argparse
+import sys
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap
@@ -7,22 +8,6 @@ import numpy as np
 from line_profiler import profile
 from multiprocessing.pool import ThreadPool
 
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Run building temperature simulation")
-    parser.add_argument("num_buildings", nargs="?", type=int, default=1,
-                        help="Number of buildings to simulate")
-    parser.add_argument("--workers", "-w", type=int, default=4,
-                        help="Number of worker threads")
-    parser.add_argument("--max-iter", type=int, default=20_000,
-                        help="Maximum Jacobi iterations")
-    parser.add_argument("--abs-tol", type=float, default=1e-4,
-                        help="Absolute tolerance for Jacobi convergence")
-    parser.add_argument("--no-plots", action="store_true",
-                        help="Skip saving comparison plots")
-    parser.add_argument("--dynamic", action="store_true",
-                        help="Use dynamic scheduling instead of static")
-    return parser.parse_args()
 
 def load_data(load_dir, bid):
     SIZE = 512
@@ -117,17 +102,18 @@ def summary_stats(u, interior_mask):
 
 
 if __name__ == '__main__':
-    args = parse_args()
-
     # Load data
     LOAD_DIR = '/dtu/projects/02613_2025/data/modified_swiss_dwellings/'
     with open(join(LOAD_DIR, 'building_ids.txt'), 'r') as f:
         building_ids = f.read().splitlines()
 
-    N = args.num_buildings
-    if N < 1:
-        raise ValueError("num_buildings must be at least 1")
-
+    if len(sys.argv) < 3:
+        N = 1
+        workers = 1
+    else:
+        N = int(sys.argv[1])
+        workers = int(sys.argv[2])
+    
     building_ids = building_ids[:N]
 
     # Load floor plans
@@ -140,24 +126,25 @@ if __name__ == '__main__':
         
 
     # Run jacobi iterations for each floor plan
-    MAX_ITER = args.max_iter
-    ABS_TOL = args.abs_tol
+    MAX_ITER = 20_000
+    ABS_TOL = 1e-4
 
-    num_workers = max(1, args.workers)
+    num_workers = max(1, workers)
     all_u = np.empty_like(all_u0)
 
     def worker_task(chunk):
         return [jacobi(all_u0[i], all_interior_mask[i], MAX_ITER, ABS_TOL) for i in chunk]
 
-    if args.dynamic:
-        # Dynamic scheduling: each task gets a single building for maximum load balancing
-        with ThreadPool(num_workers) as pool:
-            results = pool.map(worker_task, [[i] for i in range(N)])
-    else:
-        # Static scheduling: pre-split floor plans into fixed chunks per worker
-        chunks = [chunk for chunk in np.array_split(np.arange(N), num_workers) if chunk.size > 0]
-        with ThreadPool(num_workers) as pool:
-            results = pool.map(worker_task, chunks)
+
+    # Comment out for dynamic/static scheduling comparison
+    # Dynamic scheduling: each task gets a single building for maximum load balancing
+    with ThreadPool(num_workers) as pool:
+        results = pool.map(worker_task, [[i] for i in range(N)])
+
+    # Static scheduling: pre-split floor plans into fixed chunks per worker
+    # chunks = [chunk for chunk in np.array_split(np.arange(N), num_workers) if chunk.size > 0]
+    # with ThreadPool(num_workers) as pool:
+    #     results = pool.map(worker_task, chunks)
 
     # Flatten results back into all_u
     idx = 0
@@ -172,5 +159,3 @@ if __name__ == '__main__':
     for bid, u, interior_mask in zip(building_ids, all_u, all_interior_mask):
         stats = summary_stats(u, interior_mask)
         print(f"{bid},", ", ".join(str(stats[k]) for k in stat_keys))
-        if not args.no_plots:
-            visualise_temperature(u, interior_mask, bid, save_path=f"{bid}_comparison_floorplan.png", show=False)

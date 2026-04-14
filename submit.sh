@@ -13,8 +13,12 @@
 source /dtu/projects/02613_2025/conda/conda_init.sh
 conda activate 02613
 
-# Run the Python script - Static scheduling
-python benchmark_speedup.py --num-buildings 10 --repeats 3 --cores 1,2,3,4,5,6,7,8 --csv output/speedup_static.csv --plot output/speedup_static.png
-
-# Run the Python script - Dynamic scheduling
-python benchmark_speedup.py --num-buildings 10 --repeats 3 --cores 1,2,3,4,5,6,7,8 --dynamic --csv output/speedup_dynamic.csv --plot output/speedup_dynamic.png
+# Run the Python script
+time python -u simulate.py 1000 1
+# time python -u simulate.py 1000 2
+# time python -u simulate.py 1000 3
+# time python -u simulate.py 1000 4
+# time python -u simulate.py 1000 5
+# time python -u simulate.py 1000 6
+# time python -u simulate.py 1000 7
+# time python -u simulate.py 1000 8

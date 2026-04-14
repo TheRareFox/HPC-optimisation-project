@@ -37,10 +37,15 @@ Dynamic scheduling benchmark:
 ## Project structure
 
 .
+
 ├── benchmark_speedup.py
+
 ├── simulate.py
+
 ├── submit.sh
+
 ├── visualise.ipynb
+
 ├── diagrams/
 
 ### File overview
