@@ -1,5 +1,4 @@
 from os.path import join
-import argparse
 import sys
 
 import matplotlib.pyplot as plt
@@ -16,63 +15,7 @@ def load_data(load_dir, bid):
     interior_mask = np.load(join(load_dir, f"{bid}_interior.npy"))
     return u, interior_mask
 
-
-def visualise_temperature(u, interior_mask, bid=None, save_path=None, show=True):
-    old_u = None
-    old_mask = None
-    if bid:
-        old_u, old_mask = load_data(LOAD_DIR, bid)
-
-    padded_mask = np.zeros_like(u, dtype=bool)
-    padded_mask[1:-1, 1:-1] = interior_mask
-
-    interior_only = np.ma.masked_where(~padded_mask, u)
-    walls = np.zeros_like(u, dtype=int)
-    walls[u == 5] = 1
-    walls[u == 25] = 2
-    walls = np.ma.masked_where(walls == 0, walls)
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5), constrained_layout=True)
-
-    if old_u is not None and old_mask is not None:
-        old_padded_mask = np.zeros_like(old_u, dtype=bool)
-        old_padded_mask[1:-1, 1:-1] = old_mask
-        old_categories = np.zeros_like(old_u, dtype=int)
-        old_categories[old_u == 5] = 1
-        old_categories[old_u == 25] = 2
-        old_categories[old_padded_mask] = 3
-
-        floorplan_cmap = ListedColormap(["white", "#4c78a8", "#f58518", "#54a24b"])
-        floorplan_norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], floorplan_cmap.N)
-        floorplan_plot = axes[0].imshow(old_categories, origin="lower", cmap=floorplan_cmap, norm=floorplan_norm)
-        axes[0].set_title(f"Floor Plan: {bid}")
-        axes[0].set_xlabel("x")
-        axes[0].set_ylabel("y")
-        colorbar = fig.colorbar(floorplan_plot, ax=axes[0], shrink=0.85, ticks=[0, 1, 2, 3])
-        colorbar.ax.set_yticklabels(["outside", "load-bearing wall", "inside wall", "interior"])
-    else:
-        axes[0].axis("off")
-
-    overlay_plot = axes[1].imshow(interior_only, origin="lower", cmap="coolwarm")
-    wall_cmap = ListedColormap(["#4c78a8", "#f58518"])
-    wall_norm = BoundaryNorm([0.5, 1.5, 2.5], wall_cmap.N)
-    axes[1].imshow(walls, origin="lower", cmap=wall_cmap, norm=wall_norm, alpha=0.95)
-    axes[1].set_title(f"Temperature of {bid}")
-    axes[1].set_xlabel("x")
-    axes[1].set_ylabel("y")
-    fig.colorbar(overlay_plot, ax=axes[1], shrink=0.85, label="Temperature")
-
-    if save_path is not None:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-
-    if show:
-        plt.show()
-    else:
-        plt.close(fig)
-
-    return fig, axes
-
-@profile
+# @profile
 def jacobi(u, interior_mask, max_iter, atol=1e-6):
     u = np.copy(u)
 
@@ -124,7 +67,6 @@ if __name__ == '__main__':
         all_u0[i] = u0
         all_interior_mask[i] = interior_mask
         
-
     # Run jacobi iterations for each floor plan
     MAX_ITER = 20_000
     ABS_TOL = 1e-4
@@ -138,8 +80,9 @@ if __name__ == '__main__':
 
     # Comment out for dynamic/static scheduling comparison
     # Dynamic scheduling: each task gets a single building for maximum load balancing
+    chunks = [[i] for i in range(N)]
     with ThreadPool(num_workers) as pool:
-        results = pool.map(worker_task, [[i] for i in range(N)])
+        results = pool.map(worker_task, chunks)
 
     # Static scheduling: pre-split floor plans into fixed chunks per worker
     # chunks = [chunk for chunk in np.array_split(np.arange(N), num_workers) if chunk.size > 0]
