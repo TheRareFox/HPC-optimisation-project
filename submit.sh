@@ -5,8 +5,8 @@
 #BSUB -W 30
 #BSUB -R "rusage[mem=2048MB]"
 #BSUB -R "span[hosts=1]"
-#BSUB -o output/test_core_8.out
-#BSUB -e error/test_core_8%.err
+#BSUB -o output/dynamic_core_8.out
+#BSUB -e error/dynamic_core_8.err
 #BSUB -n 8
 #BSUB -gpu "num=1:mode=exclusive_process"
 
@@ -23,4 +23,4 @@ conda activate 02613_2026
 # time python -u simulate.py 10 5
 # time python -u simulate.py 10 6
 # time python -u simulate.py 10 7
-time python -u simulate.py 10 8
+time python -u simulate.py 50 8

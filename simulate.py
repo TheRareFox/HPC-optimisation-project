@@ -1,41 +1,116 @@
 from os.path import join
+import argparse
 import sys
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap
-import numpy as np
+import cupy as cp
 from line_profiler import profile
 from multiprocessing.pool import ThreadPool
+from time import perf_counter
+from numba import cuda
 
 
 def load_data(load_dir, bid):
     SIZE = 512
-    u = np.zeros((SIZE + 2, SIZE + 2))
-    u[1:-1, 1:-1] = np.load(join(load_dir, f"{bid}_domain.npy"))
-    interior_mask = np.load(join(load_dir, f"{bid}_interior.npy"))
+    u = cp.zeros((SIZE + 2, SIZE + 2))
+    u[1:-1, 1:-1] = cp.load(join(load_dir, f"{bid}_domain.npy"))
+    interior_mask = cp.load(join(load_dir, f"{bid}_interior.npy"))
     return u, interior_mask
 
-# @profile
+
+def visualise_temperature(u, interior_mask, bid=None, save_path=None, show=True):
+    old_u = None
+    old_mask = None
+    if bid:
+        old_u, old_mask = load_data(LOAD_DIR, bid)
+
+    padded_mask = cp.zeros_like(u, dtype=bool)
+    padded_mask[1:-1, 1:-1] = interior_mask
+
+    interior_only = cp.ma.masked_where(~padded_mask, u)
+    walls = cp.zeros_like(u, dtype=int)
+    walls[u == 5] = 1
+    walls[u == 25] = 2
+    walls = cp.ma.masked_where(walls == 0, walls)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5), constrained_layout=True)
+
+    if old_u is not None and old_mask is not None:
+        old_padded_mask = cp.zeros_like(old_u, dtype=bool)
+        old_padded_mask[1:-1, 1:-1] = old_mask
+        old_categories = cp.zeros_like(old_u, dtype=int)
+        old_categories[old_u == 5] = 1
+        old_categories[old_u == 25] = 2
+        old_categories[old_padded_mask] = 3
+
+        floorplan_cmap = ListedColormap(["white", "#4c78a8", "#f58518", "#54a24b"])
+        floorplan_norm = BoundaryNorm([-0.5, 0.5, 1.5, 2.5, 3.5], floorplan_cmap.N)
+        floorplan_plot = axes[0].imshow(old_categories, origin="lower", cmap=floorplan_cmap, norm=floorplan_norm)
+        axes[0].set_title(f"Floor Plan: {bid}")
+        axes[0].set_xlabel("x")
+        axes[0].set_ylabel("y")
+        colorbar = fig.colorbar(floorplan_plot, ax=axes[0], shrink=0.85, ticks=[0, 1, 2, 3])
+        colorbar.ax.set_yticklabels(["outside", "load-bearing wall", "inside wall", "interior"])
+    else:
+        axes[0].axis("off")
+
+    overlay_plot = axes[1].imshow(interior_only, origin="lower", cmap="coolwarm")
+    wall_cmap = ListedColormap(["#4c78a8", "#f58518"])
+    wall_norm = BoundaryNorm([0.5, 1.5, 2.5], wall_cmap.N)
+    axes[1].imshow(walls, origin="lower", cmap=wall_cmap, norm=wall_norm, alpha=0.95)
+    axes[1].set_title(f"Temperature of {bid}")
+    axes[1].set_xlabel("x")
+    axes[1].set_ylabel("y")
+    fig.colorbar(overlay_plot, ax=axes[1], shrink=0.85, label="Temperature")
+
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig, axes
+
+
+@cuda.jit
+def cuda_kernel(u, interior_mask):
+    i = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x # computing the index for the rows
+    j = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y # computing the index for the columns
+    if i >= 512 or j >= 512: # if the indexes of the points are outside the grid, it shouldn't do anything
+        return
+    if not interior_mask[i, j]: # if the indexes of the points are outside of our mask, we also don't want to do anything with them
+        return
+    new_val = 0.25 * (u[i, j+1] + u[i+2, j+1] + u[i+1, j] + u[i+1, j+2])
+    u[i+1, j+1] = new_val
+
+def get_bpg(n, tpb):
+    return (n + (tpb - 1)) // tpb
+
+
 def jacobi(u, interior_mask, max_iter, atol=1e-6):
-    u = np.copy(u)
+    u_device = cuda.to_device(u)
+    interior_mask_device = cuda.to_device(interior_mask)
+    
+    TPB = (16, 16)
+    bpg = (get_bpg(512, 16), get_bpg(512, 16))
 
     for _ in range(max_iter):
-        # Compute average of left, right, up and down neighbors, see eq. (1)
-        u_new = 0.25 * (u[1:-1, :-2] + u[1:-1, 2:] + u[:-2, 1:-1] + u[2:, 1:-1])
-        u_new_interior = u_new[interior_mask]
-        delta = np.abs(u[1:-1, 1:-1][interior_mask] - u_new_interior).max()
-        u[1:-1, 1:-1][interior_mask] = u_new_interior
+        cuda_kernel[bpg, TPB](u_device, interior_mask_device)
 
-        if delta < atol:
-            break
-    return u
+    u_result = u_device.copy_to_host()
+
+    return cp.asarray(u_result) # copy_to_host() always returns a Numpy array, so we need it to return a Cupy array
+
 
 def summary_stats(u, interior_mask):
     u_interior = u[1:-1, 1:-1][interior_mask]
     mean_temp = u_interior.mean()
     std_temp = u_interior.std()
-    pct_above_18 = np.sum(u_interior > 18) / u_interior.size * 100
-    pct_below_15 = np.sum(u_interior < 15) / u_interior.size * 100
+    pct_above_18 = cp.sum(u_interior > 18) / u_interior.size * 100
+    pct_below_15 = cp.sum(u_interior < 15) / u_interior.size * 100
     return {
         'mean_temp': mean_temp,
         'std_temp': std_temp,
@@ -46,6 +121,13 @@ def summary_stats(u, interior_mask):
 
 if __name__ == '__main__':
     # Load data
+
+    test_function = cp.empty((1, 514, 514)) # These functions just need to be of the same type as the one we're going to use later
+    test_function_2 = cp.empty((1, 512, 512), dtype='bool')
+    jacobi(test_function[0], test_function_2[0], 20, 1e-4) # We need to run the function once for it to compile before we time everything
+
+    start = perf_counter()
+
     LOAD_DIR = '/dtu/projects/02613_2025/data/modified_swiss_dwellings/'
     with open(join(LOAD_DIR, 'building_ids.txt'), 'r') as f:
         building_ids = f.read().splitlines()
@@ -60,41 +142,28 @@ if __name__ == '__main__':
     building_ids = building_ids[:N]
 
     # Load floor plans
-    all_u0 = np.empty((N, 514, 514))
-    all_interior_mask = np.empty((N, 512, 512), dtype='bool')
+    all_u0 = cp.empty((N, 514, 514))
+    all_interior_mask = cp.empty((N, 512, 512), dtype='bool')
     for i, bid in enumerate(building_ids):
         u0, interior_mask = load_data(LOAD_DIR, bid)
         all_u0[i] = u0
         all_interior_mask[i] = interior_mask
         
+
     # Run jacobi iterations for each floor plan
     MAX_ITER = 20_000
     ABS_TOL = 1e-4
 
     num_workers = max(1, workers)
-    all_u = np.empty_like(all_u0)
+    all_u = cp.empty_like(all_u0)
 
     def worker_task(chunk):
         return [jacobi(all_u0[i], all_interior_mask[i], MAX_ITER, ABS_TOL) for i in chunk]
 
-
-    # Comment out for dynamic/static scheduling comparison
-    # Dynamic scheduling: each task gets a single building for maximum load balancing
-    chunks = [[i] for i in range(N)]
-    with ThreadPool(num_workers) as pool:
-        results = pool.map(worker_task, chunks)
-
-    # Static scheduling: pre-split floor plans into fixed chunks per worker
-    # chunks = [chunk for chunk in np.array_split(np.arange(N), num_workers) if chunk.size > 0]
-    # with ThreadPool(num_workers) as pool:
-    #     results = pool.map(worker_task, chunks)
-
     # Flatten results back into all_u
-    idx = 0
-    for chunk_result in results:
-        for u in chunk_result:
-            all_u[idx] = u
-            idx += 1
+
+    for i in range(N):
+        all_u[i] = jacobi(all_u0[i], all_interior_mask[i], MAX_ITER, ABS_TOL)
 
     # Print summary statistics in CSV format
     stat_keys = ['mean_temp', 'std_temp', 'pct_above_18', 'pct_below_15']
@@ -102,3 +171,6 @@ if __name__ == '__main__':
     for bid, u, interior_mask in zip(building_ids, all_u, all_interior_mask):
         stats = summary_stats(u, interior_mask)
         print(f"{bid},", ", ".join(str(stats[k]) for k in stat_keys))
+    
+    end_time = perf_counter() - start
+    print(end_time)
