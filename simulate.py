@@ -129,7 +129,7 @@ if __name__ == '__main__':
     test_function_2 = cp.zeros((1, 512, 512), dtype='bool')
     jacobi(1, test_function, test_function_2, 20, 1e-4) # We need to run the function once for it to compile before we time everything
 
-    start = perf_counter()
+    start_timer = perf_counter()
 
     LOAD_DIR = '/dtu/projects/02613_2025/data/modified_swiss_dwellings/'
     with open(join(LOAD_DIR, 'building_ids.txt'), 'r') as f:
@@ -141,13 +141,18 @@ if __name__ == '__main__':
         N = int(sys.argv[1])
     
     building_ids = building_ids[:N]
-
+    print(f'Processing {N} buildings...')
+    print(f'Building IDs: {building_ids}')
     all_u = cp.empty((N, 514, 514))
 
+    # Print summary statistics in CSV format
+    stat_keys = ['mean_temp', 'std_temp', 'pct_above_18', 'pct_below_15']
+    print('building_id, ' + ', '.join(stat_keys))  # CSV header
+
     CHUNK_SIZE = 100
-    for c in range(N//CHUNK_SIZE): # Break it to process in chunks of CHUNK_SIZE to reduce mem used
-        start = c*CHUNK_SIZE
-        end = min((c+1)*CHUNK_SIZE, N)
+    for c in range(0, N, CHUNK_SIZE): # Break it to process in chunks of CHUNK_SIZE to reduce mem used
+        start = c
+        end = min(c + CHUNK_SIZE, N)
         # Load floor plans
         all_u0 = cp.empty((CHUNK_SIZE, 514, 514))
         all_interior_mask = cp.empty((CHUNK_SIZE, 512, 512), dtype='bool')
@@ -161,14 +166,11 @@ if __name__ == '__main__':
         MAX_ITER = 20_000
         ABS_TOL = 1e-4
 
-        all_u[start:end] = jacobi(CHUNK_SIZE, all_u0, all_interior_mask, MAX_ITER, ABS_TOL)
+        u_chunk = jacobi(CHUNK_SIZE, all_u0, all_interior_mask, MAX_ITER, ABS_TOL)
 
-    # Print summary statistics in CSV format
-    stat_keys = ['mean_temp', 'std_temp', 'pct_above_18', 'pct_below_15']
-    print('building_id, ' + ', '.join(stat_keys))  # CSV header
-    for bid, u, interior_mask in zip(building_ids, all_u, all_interior_mask):
-        stats = summary_stats(u, interior_mask)
-        print(f"{bid},", ", ".join(str(stats[k]) for k in stat_keys))
+        for bid, u, interior_mask in zip(building_ids[start:end], u_chunk, all_interior_mask):
+            stats = summary_stats(u, interior_mask)
+            print(f"{bid},", ", ".join(str(stats[k]) for k in stat_keys))
     
-    end_time = perf_counter() - start
+    end_time = perf_counter() - start_timer
     print(f'Total time taken: {end_time}')
