@@ -76,33 +76,36 @@ def visualise_temperature(u, interior_mask, bid=None, save_path=None, show=True)
 
 
 @cuda.jit
-def cuda_kernel(u, interior_mask):
+def cuda_kernel(u, u_new, interior_mask):
     i = cuda.blockIdx.x * cuda.blockDim.x + cuda.threadIdx.x # computing the index for the rows
     j = cuda.blockIdx.y * cuda.blockDim.y + cuda.threadIdx.y # computing the index for the columns
+    b = cuda.blockIdx.z # index of the building it is calculating
+
     if i >= 512 or j >= 512: # if the indexes of the points are outside the grid, it shouldn't do anything
         return
-    if not interior_mask[i, j]: # if the indexes of the points are outside of our mask, we also don't want to do anything with them
-        return
-    new_val = 0.25 * (u[i, j+1] + u[i+2, j+1] + u[i+1, j] + u[i+1, j+2])
-    u[i+1, j+1] = new_val
+    if not interior_mask[b, i, j]: # if the indexes of the points are outside of our mask, we also don't want to do anything with them
+        return 
+    new_val = 0.25 * (u[b, i, j+1] + u[b, i+2, j+1] + u[b, i+1, j] + u[b, i+1, j+2])
+    u_new[b, i+1, j+1] = new_val # Assign to new u to prevent bleeding over effects
 
 def get_bpg(n, tpb):
     return (n + (tpb - 1)) // tpb
 
-
-def jacobi(u, interior_mask, max_iter, atol=1e-6):
-    u_device = cuda.to_device(u)
-    interior_mask_device = cuda.to_device(interior_mask)
+def jacobi(N, all_u, interior_mask, max_iter, atol=1e-6):
+    u_new = all_u.copy()
     
-    TPB = (16, 16)
-    bpg = (get_bpg(512, 16), get_bpg(512, 16))
-
+    TPB = (16, 16, 1)
+    bpg = (get_bpg(512, 16), get_bpg(512, 16), N)
     for _ in range(max_iter):
-        cuda_kernel[bpg, TPB](u_device, interior_mask_device)
+        cuda_kernel[bpg, TPB](all_u, u_new, interior_mask)
+        u_new, all_u = all_u, u_new # pointer swap so previous u becomes freed
 
-    u_result = u_device.copy_to_host()
+        # check for early termination
+        # delta = cp.abs(u_new[:, 1:-1, 1:-1][interior_mask] - all_u[:, 1:-1,1:-1][interior_mask])
+        # if delta.size == 0 or delta.max() < atol:
+        #     break
 
-    return cp.asarray(u_result) # copy_to_host() always returns a Numpy array, so we need it to return a Cupy array
+    return u_new
 
 
 def summary_stats(u, interior_mask):
@@ -122,9 +125,9 @@ def summary_stats(u, interior_mask):
 if __name__ == '__main__':
     # Load data
 
-    test_function = cp.empty((1, 514, 514)) # These functions just need to be of the same type as the one we're going to use later
-    test_function_2 = cp.empty((1, 512, 512), dtype='bool')
-    jacobi(test_function[0], test_function_2[0], 20, 1e-4) # We need to run the function once for it to compile before we time everything
+    test_function = cp.zeros((1, 514, 514)) # These functions just need to be of the same type as the one we're going to use later
+    test_function_2 = cp.zeros((1, 512, 512), dtype='bool')
+    jacobi(1, test_function, test_function_2, 20, 1e-4) # We need to run the function once for it to compile before we time everything
 
     start = perf_counter()
 
@@ -132,38 +135,33 @@ if __name__ == '__main__':
     with open(join(LOAD_DIR, 'building_ids.txt'), 'r') as f:
         building_ids = f.read().splitlines()
 
-    if len(sys.argv) < 3:
-        N = 1
-        workers = 1
+    if len(sys.argv) < 2:
+        N = len(building_ids) # Process all
     else:
         N = int(sys.argv[1])
-        workers = int(sys.argv[2])
     
     building_ids = building_ids[:N]
 
-    # Load floor plans
-    all_u0 = cp.empty((N, 514, 514))
-    all_interior_mask = cp.empty((N, 512, 512), dtype='bool')
-    for i, bid in enumerate(building_ids):
-        u0, interior_mask = load_data(LOAD_DIR, bid)
-        all_u0[i] = u0
-        all_interior_mask[i] = interior_mask
+    all_u = cp.empty((N, 514, 514))
+
+    CHUNK_SIZE = 100
+    for c in range(N//CHUNK_SIZE): # Break it to process in chunks of CHUNK_SIZE to reduce mem used
+        start = c*CHUNK_SIZE
+        end = min((c+1)*CHUNK_SIZE, N)
+        # Load floor plans
+        all_u0 = cp.empty((CHUNK_SIZE, 514, 514))
+        all_interior_mask = cp.empty((CHUNK_SIZE, 512, 512), dtype='bool')
+        for i, bid in enumerate(building_ids[start:end]):
+            u0, interior_mask = load_data(LOAD_DIR, bid)
+            all_u0[i] = u0
+            all_interior_mask[i] = interior_mask
         
 
-    # Run jacobi iterations for each floor plan
-    MAX_ITER = 20_000
-    ABS_TOL = 1e-4
+        # Run jacobi iterations for each floor plan
+        MAX_ITER = 20_000
+        ABS_TOL = 1e-4
 
-    num_workers = max(1, workers)
-    all_u = cp.empty_like(all_u0)
-
-    def worker_task(chunk):
-        return [jacobi(all_u0[i], all_interior_mask[i], MAX_ITER, ABS_TOL) for i in chunk]
-
-    # Flatten results back into all_u
-
-    for i in range(N):
-        all_u[i] = jacobi(all_u0[i], all_interior_mask[i], MAX_ITER, ABS_TOL)
+        all_u[start:end] = jacobi(CHUNK_SIZE, all_u0, all_interior_mask, MAX_ITER, ABS_TOL)
 
     # Print summary statistics in CSV format
     stat_keys = ['mean_temp', 'std_temp', 'pct_above_18', 'pct_below_15']
@@ -173,4 +171,4 @@ if __name__ == '__main__':
         print(f"{bid},", ", ".join(str(stats[k]) for k in stat_keys))
     
     end_time = perf_counter() - start
-    print(end_time)
+    print(f'Total time taken: {end_time}')
